@@ -19,6 +19,7 @@ who owns them so they can run the script themselves.
 ```bash
 git clone https://github.com/clarefmccann/fix-permissions-hoffman2.git ~/fix-permissions-hoffman2
 chmod +x ~/fix-permissions-hoffman2/fix-permissions-group-wide.sh
+git config core.fileMode false
 ```
 
 To get the latest version later:
