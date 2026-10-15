@@ -1,0 +1,9 @@
+# Paths fix-permissions-group-wide.sh must never change.
+# Everyone who installs the script skips these automatically.
+#
+# One path per line. Anything after # is a comment; blank lines are ignored.
+# Full paths are clearest. A path without a leading / is taken relative to the
+# directory you run the script on. Wildcards work: * also matches "/", so
+# */scratch skips every directory named "scratch" at any depth.
+
+/u/project/silvers/data/ABCD/wjm_sst_test
