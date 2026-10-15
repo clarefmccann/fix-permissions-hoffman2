@@ -3,25 +3,55 @@
 # Only touches files that actually need changing, prints each change it makes,
 # and ends with a summary so that "no changes" is never a mystery.
 #
-# usage: fix-permissions-group-wide.sh [-n] [-v] <base_dir> <group>
-#   -n   dry run: list what would be changed, change nothing
-#   -v   verbose: print a progress heartbeat on stderr every 15 seconds
-#        (elapsed time + the directory currently being scanned)
-#        set HEARTBEAT_SECS to change the interval
+# usage: fix-permissions-group-wide.sh [-n] [-v] [-x PATH]... [-X FILE] <base_dir> <group>
+#   -n        dry run: list what would be changed, change nothing
+#   -v        verbose: print a progress heartbeat on stderr every 15 seconds
+#             (elapsed time + the directory currently being scanned)
+#             set HEARTBEAT_SECS to change the interval
+#   -x PATH   leave PATH (and everything under it) completely untouched.
+#             Repeat -x for several paths. Relative paths are taken relative to
+#             <base_dir>. Shell-style wildcards work if quoted; * also matches "/",
+#             so -x '*/scratch' skips every directory named scratch at any depth.
+#   -X FILE   read more exclude paths from FILE (one per line, # comments allowed)
+#
+# Exclusions in excludes.txt next to this script are always applied, so the lab's
+# known "do not touch" paths are shared by everyone who installs the script.
 #
 # example: fix-permissions-group-wide.sh -v /u/project/silvers/data silvers
-#          fix-permissions-group-wide.sh -nv /u/project/silvers/data silvers
+#          fix-permissions-group-wide.sh -nv -x ABCD/wjm_sst_test /u/project/silvers/data silvers
 
 set -u
 
-usage() { echo "usage: $0 [-n] [-v] <base_dir> <group>" >&2; exit 1; }
+script_dir=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+default_excludes="$script_dir/excludes.txt"
+
+usage() { echo "usage: $0 [-n] [-v] [-x PATH]... [-X FILE] <base_dir> <group>" >&2; exit 1; }
+
+# Read exclude paths from a file: one per line, blank lines and # comments ignored.
+read_exclude_file() {
+    local line
+    if [ ! -r "$1" ]; then
+        echo "error: cannot read exclude file $1" >&2
+        exit 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        [ -n "$line" ] && raw_excludes+=( "$line" )
+    done < "$1"
+}
 
 dry_run=0
 verbose=0
-while getopts "nv" opt; do
+raw_excludes=()
+[ -f "$default_excludes" ] && read_exclude_file "$default_excludes"
+n_default=${#raw_excludes[@]}   # lab-wide entries: no warnings if they don't apply here
+while getopts "nvx:X:" opt; do
     case "$opt" in
         n) dry_run=1 ;;
         v) verbose=1 ;;
+        x) raw_excludes+=( "$OPTARG" ) ;;
+        X) read_exclude_file "$OPTARG" ;;
         *) usage ;;
     esac
 done
@@ -58,11 +88,50 @@ if ! id -nG | tr ' ' '\n' | grep -qx "$target_group"; then
     exit 1
 fi
 
-vlog "user $me, group '$target_group', base $base_dir$([ "$dry_run" -eq 1 ] && echo ' (dry run)')"
-
 # find writes one line per item of interest here; we summarise it at the end.
 tally=$(mktemp) || exit 1
 trap 'rm -f "$tally"' EXIT
+
+# ---- exclusions -------------------------------------------------------------
+# Turn each exclude into an absolute, symlink-resolved path so it matches the
+# paths find reports (find walks the resolved base_dir).
+excludes=()
+i=0
+for p in ${raw_excludes[@]+"${raw_excludes[@]}"}; do
+    i=$((i + 1))
+    [ "${p:0:1}" = "/" ] || p="$base_dir/$p"
+    p="${p%/}"
+    if [[ "$p" == *[\*\?\[]* ]]; then
+        # wildcard: resolve only the plain directories before the first wildcard
+        head="${p%%[\*\?\[]*}"
+        head="${head%/*}"
+        p="$(realpath -m "${head:-/}")${p#"$head"}"
+    else
+        p=$(realpath -m "$p")
+        if [ "$i" -le "$n_default" ]; then
+            :   # from excludes.txt: silently ignore if it doesn't apply to this run
+        elif [ ! -e "$p" ]; then
+            echo "warning: exclude path does not exist: $p" >&2
+        elif [ "$p" != "$base_dir" ] && [[ "$p" != "$base_dir"/* ]]; then
+            echo "warning: exclude path is not inside $base_dir, so it has no effect: $p" >&2
+        fi
+    fi
+    excludes+=( "$p" )
+done
+
+# find clause that prunes excluded paths (and records them); empty if no excludes.
+exclude_clause=()
+if [ "${#excludes[@]}" -gt 0 ]; then
+    exclude_test=()
+    for p in "${excludes[@]}"; do
+        [ "${#exclude_test[@]}" -gt 0 ] && exclude_test+=( -o )
+        exclude_test+=( -path "$p" )
+    done
+    exclude_clause=( \( \( "${exclude_test[@]}" \) -fprintf "$tally" 'excluded %p\n' -prune \) -o )
+fi
+
+vlog "user $me, group '$target_group', base $base_dir$([ "$dry_run" -eq 1 ] && echo ' (dry run)')"
+for p in ${excludes[@]+"${excludes[@]}"}; do vlog "excluding $p"; done
 
 # Tests for "needs fixing".
 mine=( -user "$me" )
@@ -124,11 +193,17 @@ fi
 vlog "walking the tree (this can take a while on a large or parallel filesystem)"
 
 # Single traversal (one walk of the tree is much kinder to a parallel filesystem).
-# Symlinks are skipped: chmod/chgrp would follow them and could modify targets
-# outside base_dir. Directories we cannot read are noted and pruned, not entered.
-find "$base_dir" ! -type l \
+# The branches are tried in order and the first that matches wins:
+#   1. symlinks: skipped. chmod/chgrp would follow them and could modify the
+#      link's target, which may be outside base_dir.
+#   2. excluded paths: recorded and pruned; nothing in them is checked or changed.
+#   3. directories we cannot read: recorded and pruned, not entered.
+#   4. everything else: tallied and fixed if needed.
+find "$base_dir" \
+    -type l -o \
+    ${exclude_clause[@]+"${exclude_clause[@]}"} \
     \( -type d ! -readable -fprintf "$tally" 'denied %p\n' -prune \) -o \( \
-       \( "${mine[@]}"                    -fprintf "$tally" 'mine\n' \) , \
+       \( "${mine[@]}"                     -fprintf "$tally" 'mine\n' \) , \
        \( "${mine[@]}"   "${needs_fix[@]}" -fprintf "$tally" 'fix\n' \) , \
        \( ! "${mine[@]}" "${needs_fix[@]}" -fprintf "$tally" 'other %u\n' \) , \
        "${actions[@]}" \
@@ -159,6 +234,16 @@ fi
 if [ "$n_other" -gt 0 ]; then
     echo "# $n_other items owned by OTHER users need fixing; only their owner can do that:"
     grep '^other ' "$tally" | cut -d' ' -f2 | sort | uniq -c | sort -rn | sed 's/^/#   /'
+fi
+
+# Excluded paths that were actually found and skipped.
+if [ "${#excludes[@]}" -gt 0 ]; then
+    n_excl=$(grep -c '^excluded ' "$tally")
+    if [ "$n_excl" -gt 0 ]; then
+        echo "# $n_excl excluded paths were left untouched (nothing inside them was checked):"
+        sed -n 's/^excluded //p' "$tally" | head -n 20 | sed 's/^/#   /'
+        [ "$n_excl" -gt 20 ] && echo "#   ... and $((n_excl - 20)) more"
+    fi
 fi
 
 # Directories we could not read (no group r/x). Skipped; nothing beneath them was checked.
