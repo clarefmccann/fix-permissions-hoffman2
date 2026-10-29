@@ -19,6 +19,7 @@ who owns them so they can run the script themselves.
 ```bash
 git clone https://github.com/clarefmccann/fix-permissions-hoffman2.git ~/fix-permissions-hoffman2
 chmod +x ~/fix-permissions-hoffman2/fix-permissions-group-wide.sh
+chmod +x ~/fix-permissions-hoffman2/fixperms.sbatch
 git -C ~/fix-permissions-hoffman2 config core.fileMode false
 ```
 
@@ -31,7 +32,7 @@ cd ~/fix-permissions-hoffman2 && git pull
 ## Usage
 
 ```bash
-~/fix-permissions-hoffman2/fix-permissions-group-wide.sh [-n] [-v] [-x PATH]... [-X FILE] <base_dir> <group>
+bash ~/fix-permissions-hoffman2/fix-permissions-group-wide.sh [-n] [-v] [-x PATH]... [-X FILE] <base_dir> <group>
 ```
 
 | Option    | What it does |
@@ -77,20 +78,20 @@ srun --time=8:00:00 --mem=1G --pty bash -l
 **3. Do a dry run first:**
 
 ```bash
-~/fix-permissions-hoffman2/fix-permissions-group-wide.sh -n -v /u/project/silvers/data silvers
+bash ~/fix-permissions-hoffman2/fix-permissions-group-wide.sh -n -v /u/project/silvers/data silvers
 ```
 
 **4. Then run it for real:**
 
 ```bash
-~/fix-permissions-hoffman2/fix-permissions-group-wide.sh -v /u/project/silvers/data silvers
+bash ~/fix-permissions-hoffman2/fix-permissions-group-wide.sh -v /u/project/silvers/data silvers
 ```
 
 To save the list of changes to a file while still seeing progress on screen
 (progress goes to stderr, changes to stdout):
 
 ```bash
-~/fix-permissions-hoffman2/fix-permissions-group-wide.sh -v /u/project/silvers/data silvers > changes.log
+bash ~/fix-permissions-hoffman2/fix-permissions-group-wide.sh -v /u/project/silvers/data silvers > logs/changes.log
 ```
 
 **5. Type `exit`** when it's done to end the session and release the node.
@@ -100,26 +101,14 @@ To save the list of changes to a file while still seeing progress on screen
 If you'd rather submit it and walk away, **don't `sbatch` the script itself**.
 Slurm runs a copy of the submitted script from a spool directory, so it can't
 find `excludes.txt` and the lab's "do not touch" paths would not be skipped.
-Submit a small wrapper that calls the installed script instead, e.g.
-`fixperms.sbatch`:
 
-```bash
-#!/bin/bash
-#SBATCH --job-name=fixperms
-#SBATCH --time=12:00:00
-#SBATCH --mem=1G
-#SBATCH --output=fixperms-%j.out
-#SBATCH --error=fixperms-%j.err
-
-~/fix-permissions-hoffman2/fix-permissions-group-wide.sh -v /u/project/silvers/data silvers
-```
 
 ```bash
 sbatch fixperms.sbatch      # prints the job ID
 squeue --me                 # is it pending (PD) or running (R)?
-tail -f fixperms-<JOB_ID>.err   # live progress
-cat fixperms-<JOB_ID>.out       # changes + summary when done
-scancel <JOB_ID>            # stop it
+tail -f logs/progress/fixperms-<JOB_ID>.progress   # live progress
+cat logs/changes/fixperms-<JOB_ID>.changes       # changes + summary when done
+scancel <JOB_ID>            # stop it (ONLY IF NOTICING ERROR)
 ```
 
 The separate `--error` file keeps the progress lines out of the list of changes
