@@ -5,4 +5,4 @@
 #SBATCH --output=logs/changes/fixperms-%j.changes
 #SBATCH --error=logs/progress/fixperms-%j.progress
 
-~/fix-permissions-hoffman2/fix-permissions-group-wide.sh -v /u/project/silvers/data silvers
+bash ~/fix-permissions-hoffman2/fix-permissions-group-wide.sh -v /u/project/silvers/data silvers
